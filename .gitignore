@@ -1,0 +1,23 @@
+# Local environments and Python cache
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Build output
+build/
+dist/
+*.app/
+*.exe
+*.log
+
+# Local settings and secrets
+.env
+.env.*
+.idea/
+.vscode/
+
+# OS metadata
+.DS_Store
+Thumbs.db
