@@ -7,6 +7,8 @@ numpy.ndarray формы (число отсчётов, число каналов
 
 import sys
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -15,10 +17,12 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLayout, QScrollArea, QVBoxLayout, QWidget,
-    QMainWindow, QPlainTextEdit, QSizePolicy,
+    QMainWindow, QPlainTextEdit, QSizePolicy, QPushButton, QFileDialog, QMessageBox,
 )
 import pyqtgraph as pg
 from pylsl import StreamInlet, resolve_byprop
+
+from app.recording import CsvRecording
 
 
 WINDOW_SEC = 0.2
@@ -49,7 +53,7 @@ class LSLReceiver(QThread):
 
     connected = pyqtSignal(object)
     disconnected = pyqtSignal()
-    chunk_received = pyqtSignal(object)
+    chunk_received = pyqtSignal(object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -81,11 +85,11 @@ class LSLReceiver(QThread):
                 self._inlet.open_stream(timeout=1.0)
                 self.connected.emit(info)
                 while self._running:
-                    chunk, _timestamps = self._inlet.pull_chunk(timeout=0.2, max_samples=4096)
+                    chunk, timestamps = self._inlet.pull_chunk(timeout=0.2, max_samples=4096)
                     if chunk:
                         array = np.asarray(chunk, dtype=np.float64)
                         if array.ndim == 2 and array.shape[1] == info.channel_count():
-                            self.chunk_received.emit(array)
+                            self.chunk_received.emit(array, np.asarray(timestamps, dtype=np.float64))
             except Exception as exc:
                 if self._running:
                     print(f"LSL: соединение прервано: {exc}", file=sys.stderr)
@@ -224,6 +228,9 @@ class SignalViewerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.signal_array = np.empty((0, 0), dtype=np.float64)
+        self.timestamps_array = np.empty(0, dtype=np.float64)
+        self.recording = CsvRecording()
+        self._connected = False
         self._array_dirty = False
         self._pending_chunks: list[np.ndarray] = []
         self.channel_widgets: list[ChannelWidget] = []
@@ -255,6 +262,9 @@ class SignalViewerWindow(QMainWindow):
             QLabel { color: white; }
             QCheckBox { color: white; spacing: 5px; font-size: 13px; }
             QCheckBox::indicator { width: 16px; height: 16px; }
+            QPushButton { background-color: #333; color: white; border-radius: 3px; padding: 8px; }
+            QPushButton:hover { background-color: #444; }
+            QPushButton:disabled { color: #777; }
         """)
         self.content_scroll = InterfaceScrollArea()
         self.content_scroll.setWidgetResizable(True)
@@ -274,6 +284,15 @@ class SignalViewerWindow(QMainWindow):
         self.status_label = QLabel("Поиск LSL потока EEG/Signal...")
         self.status_label.setWordWrap(True)
         controls.addWidget(self.status_label)
+
+        self.record_button = QPushButton("Начать запись в CSV")
+        self.record_button.setEnabled(False)
+        self.record_button.clicked.connect(self._toggle_recording)
+        controls.addWidget(self.record_button)
+        self.record_status = QLabel("Подключите LSL поток для записи")
+        self.record_status.setWordWrap(True)
+        self.record_status.setStyleSheet("color: #aaa;")
+        controls.addWidget(self.record_status)
 
         self.cb_autoscale = QCheckBox("Автомасштаб Y")
         self.cb_autoscale.setChecked(True)
@@ -345,6 +364,12 @@ class SignalViewerWindow(QMainWindow):
         self.channel_widgets.clear()
 
     def _on_connected(self, info):
+        if self.recording.active:
+            self._stop_recording("Запись завершена при смене потока")
+        self._connected = True
+        self.record_button.setEnabled(True)
+        if self.recording.path is None:
+            self.record_status.setText("Запись не начата")
         name = info.name() or "EEG"
         count = info.channel_count()
         rate = info.nominal_srate()
@@ -353,6 +378,7 @@ class SignalViewerWindow(QMainWindow):
         self.setWindowTitle(f"LSL — {name}")
         self.status_label.setText(f"Поток: {name}\nЧастота: {rate} Гц\nСэмплов: 0")
         self.signal_array = np.empty((0, count), dtype=np.float64)
+        self.timestamps_array = np.empty(0, dtype=np.float64)
         self._array_dirty = True
         self._update_array_view()
         self.sample_count = 0
@@ -374,12 +400,24 @@ class SignalViewerWindow(QMainWindow):
         self._rebuild_grid()
 
     def _on_disconnected(self):
+        self._connected = False
+        if self.recording.active:
+            self._stop_recording("Поток отключён. Запись завершена")
+        self.record_button.setEnabled(False)
         self.status_label.setText("Связь потеряна. Поиск LSL потока...")
 
-    def _on_chunk(self, array: np.ndarray):
+    def _on_chunk(self, array: np.ndarray, timestamps: np.ndarray):
         if not self.channel_widgets or array.shape[1] != len(self.channel_widgets):
             return
         self.signal_array = array
+        self.timestamps_array = timestamps
+        if self.recording.active:
+            try:
+                self.recording.append(array, timestamps)
+            except (OSError, ValueError) as exc:
+                self._recording_error(exc)
+            else:
+                self.record_status.setText(f"Идёт запись: {self.recording.sample_count} отсчётов")
         self._array_dirty = True
         self.sample_count += len(array)
         self._pending_chunks.append(array)
@@ -388,6 +426,50 @@ class SignalViewerWindow(QMainWindow):
             self._pending_chunks = self._pending_chunks[-100:]
         self.status_label.setText(
             f"Поток: {self.stream_name}\nЧастота: {self.sampling_rate} Гц\nСэмплов: {self.sample_count}"
+        )
+
+    def _toggle_recording(self):
+        if self.recording.active:
+            self._stop_recording()
+            return
+        default_name = datetime.now().strftime("lsl_%Y-%m-%d_%H-%M-%S.csv")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить запись LSL", default_name, "CSV (*.csv)"
+        )
+        if not path or not self._connected:
+            return
+        if not Path(path).suffix:
+            path += ".csv"
+        try:
+            self.recording.start(path, [widget.channel_name for widget in self.channel_widgets])
+        except OSError as exc:
+            QMessageBox.critical(self, "Ошибка сохранения", f"Не удалось открыть файл:\n{exc}")
+            return
+        self.record_button.setText("Остановить и сохранить")
+        self.record_status.setText("Идёт запись: 0 отсчётов")
+        self.record_status.setToolTip(str(self.recording.path))
+
+    def _stop_recording(self, message: str = "Запись сохранена"):
+        try:
+            self.recording.stop()
+        except OSError as exc:
+            self._recording_error(exc)
+            return
+        self.record_button.setText("Начать запись в CSV")
+        self.record_status.setText(
+            f"{message}\n{self.recording.sample_count} отсчётов\n{self.recording.path.name}"
+        )
+
+    def _recording_error(self, error: Exception):
+        try:
+            self.recording.stop()
+        except OSError:
+            pass
+        self.record_button.setText("Начать запись в CSV")
+        self.record_status.setText("Запись прервана: ошибка сохранения")
+        QMessageBox.critical(
+            self, "Ошибка сохранения",
+            f"Запись остановлена. Часть данных могла не сохраниться.\n{error}",
         )
 
     def _update_array_view(self):
@@ -445,6 +527,8 @@ class SignalViewerWindow(QMainWindow):
             widget.show()
 
     def closeEvent(self, event):
+        if self.recording.active:
+            self._stop_recording()
         self.receiver.stop()
         super().closeEvent(event)
 
