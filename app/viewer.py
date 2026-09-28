@@ -10,12 +10,12 @@ import time
 from typing import Optional
 
 import numpy as np
-from PyQt5.QtCore import QThread, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
-    QMainWindow, QPlainTextEdit,
+    QHBoxLayout, QLabel, QLayout, QScrollArea, QVBoxLayout, QWidget,
+    QMainWindow, QPlainTextEdit, QSizePolicy,
 )
 import pyqtgraph as pg
 from pylsl import StreamInlet, resolve_byprop
@@ -98,6 +98,20 @@ class LSLReceiver(QThread):
                     self.disconnected.emit()
 
 
+class InterfaceScrollArea(QScrollArea):
+    """Прокрутка окна колесом мыши, в том числе поверх графиков."""
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel and self.verticalScrollBar().maximum() > 0:
+            delta = event.pixelDelta().y() or event.angleDelta().y()
+            if delta:
+                scrollbar = self.verticalScrollBar()
+                scrollbar.setValue(scrollbar.value() - delta)
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
+
 class ChannelWidget(QFrame):
     """График канала в прежнем тёмном оформлении."""
 
@@ -114,6 +128,7 @@ class ChannelWidget(QFrame):
         self.is_active = True
 
         self.setFrameShape(QFrame.StyledPanel)
+        self.setMinimumHeight(180)
         self.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 4px; }")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
@@ -141,6 +156,7 @@ class ChannelWidget(QFrame):
         layout.addWidget(self.plot_widget)
         self.stats_label = QLabel("Ожидание...")
         self.stats_label.setFont(QFont("Courier", 7))
+        self.stats_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.stats_label.setStyleSheet("color: #a8ff9e; background-color: transparent; border: none;")
         layout.addWidget(self.stats_label)
 
@@ -211,7 +227,6 @@ class SignalViewerWindow(QMainWindow):
         self._array_dirty = False
         self._pending_chunks: list[np.ndarray] = []
         self.channel_widgets: list[ChannelWidget] = []
-        self.checkboxes: list[QCheckBox] = []
         self.sample_count = 0
         self.stream_name = ""
         self.sampling_rate = 0.0
@@ -240,12 +255,16 @@ class SignalViewerWindow(QMainWindow):
             QLabel { color: white; }
             QCheckBox { color: white; spacing: 5px; font-size: 13px; }
             QCheckBox::indicator { width: 16px; height: 16px; }
-            QPushButton { background-color: #333; color: white; border-radius: 3px; padding: 5px; }
-            QPushButton:hover { background-color: #444; }
         """)
+        self.content_scroll = InterfaceScrollArea()
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.content_scroll.setStyleSheet("QScrollArea { background-color: #0a0a0a; border: none; }")
+        self.setCentralWidget(self.content_scroll)
         central = QWidget()
-        self.setCentralWidget(central)
+        self.content_scroll.setWidget(central)
         main = QHBoxLayout(central)
+        main.setSizeConstraint(QLayout.SetMinimumSize)
         main.setContentsMargins(5, 5, 5, 5)
 
         sidebar = QWidget()
@@ -292,23 +311,7 @@ class SignalViewerWindow(QMainWindow):
         x_layout.addWidget(self.spin_x_window)
         controls.addWidget(scale_x)
 
-        title = QLabel("ОТОБРАЖЕНИЕ:")
-        title.setFont(QFont("Arial", 10, QFont.Bold))
-        controls.addWidget(title)
-        buttons = QHBoxLayout()
-        for label, state in (("Все", True), ("Сброс", False)):
-            button = QPushButton(label)
-            button.clicked.connect(lambda _checked=False, enabled=state: self._set_all_channels(enabled))
-            buttons.addWidget(button)
-        controls.addLayout(buttons)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
-        container = QWidget()
-        self.cb_layout = QVBoxLayout(container)
-        self.cb_layout.setSpacing(6)
-        scroll.setWidget(container)
-        controls.addWidget(scroll)
+        controls.addStretch()
 
         right = QWidget()
         self.right_layout = QVBoxLayout(right)
@@ -331,7 +334,7 @@ class SignalViewerWindow(QMainWindow):
         self.array_view.setMaximumHeight(240)
         array_layout.addWidget(self.array_view)
         self.right_layout.addWidget(array_group)
-        main.addWidget(sidebar)
+        main.addWidget(sidebar, alignment=Qt.AlignTop)
         main.addWidget(right, stretch=1)
         self.resize(1600, 1000)
 
@@ -340,11 +343,6 @@ class SignalViewerWindow(QMainWindow):
             self.grid_layout.removeWidget(widget)
             widget.deleteLater()
         self.channel_widgets.clear()
-        while self.cb_layout.count():
-            item = self.cb_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self.checkboxes.clear()
 
     def _on_connected(self, info):
         name = info.name() or "EEG"
@@ -371,13 +369,8 @@ class SignalViewerWindow(QMainWindow):
         for index, channel_name in enumerate(get_channel_names(info, count)):
             widget = ChannelWidget(index, channel_name, rate)
             widget.set_time_window(self.spin_x_window.value())
+            widget.plot_widget.viewport().installEventFilter(self.content_scroll)
             self.channel_widgets.append(widget)
-            checkbox = QCheckBox(f"[{index + 1}] {channel_name}")
-            checkbox.setChecked(True)
-            checkbox.stateChanged.connect(self._rebuild_grid)
-            self.checkboxes.append(checkbox)
-            self.cb_layout.addWidget(checkbox)
-        self.cb_layout.addStretch()
         self._rebuild_grid()
 
     def _on_disconnected(self):
@@ -442,25 +435,12 @@ class SignalViewerWindow(QMainWindow):
         for widget in self.channel_widgets:
             widget.set_time_window(self.spin_x_window.value())
 
-    def _set_all_channels(self, enabled: bool):
-        for checkbox in self.checkboxes:
-            checkbox.blockSignals(True)
-            checkbox.setChecked(enabled)
-            checkbox.blockSignals(False)
-        self._rebuild_grid()
-
     def _rebuild_grid(self):
         if not hasattr(self, "grid_layout"):
             return
-        for widget in self.channel_widgets:
-            self.grid_layout.removeWidget(widget)
-            widget.is_active = False
-            widget.hide()
-        active = [i for i, checkbox in enumerate(self.checkboxes) if checkbox.isChecked()]
-        columns = 1 if len(active) == 1 else 2 if len(active) <= 4 else 3
-        for position, index in enumerate(active):
-            widget = self.channel_widgets[index]
-            widget.is_active = True
+        count = len(self.channel_widgets)
+        columns = 1 if count == 1 else 2 if count <= 4 else 3
+        for position, widget in enumerate(self.channel_widgets):
             self.grid_layout.addWidget(widget, position // columns, position % columns)
             widget.show()
 
