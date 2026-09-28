@@ -8,7 +8,6 @@ numpy.ndarray формы (число отсчётов, число каналов
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -438,8 +437,6 @@ class SignalViewerWindow(QMainWindow):
         )
         if not path or not self._connected:
             return
-        if not Path(path).suffix:
-            path += ".csv"
         try:
             self.recording.start(path, [widget.channel_name for widget in self.channel_widgets])
         except OSError as exc:

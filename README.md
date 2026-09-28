@@ -42,7 +42,7 @@ python scripts/build_app.py
 
 Для автоматической установки зависимостей и сборки на Windows запустите `build_windows.bat`. Подробности — в `BUILD_WINDOWS.md`.
 
-В `build_templates/github-actions.yml` подготовлен шаблон сборки приложений для Windows и macOS. Чтобы включить GitHub Actions, добавьте его в репозиторий как `.github/workflows/build.yml` через GitHub или с токеном, имеющим право `workflow`. После успешной сборки готовые архивы появятся в разделе Actions → Build applications → Artifacts.
+GitHub Actions автоматически собирает приложения для Windows и macOS после отправки изменений в `main`. Настройки находятся в `.github/workflows/build.yml`. Готовые архивы доступны в разделе Actions → Build applications → Artifacts.
 
 ## Структура
 
