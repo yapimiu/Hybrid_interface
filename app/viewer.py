@@ -293,6 +293,15 @@ class SignalViewerWindow(QMainWindow):
         self.record_status.setStyleSheet("color: #aaa;")
         controls.addWidget(self.record_status)
 
+        self.save_graphs_button = QPushButton("Сохранить графики (PNG)")
+        self.save_graphs_button.setEnabled(False)
+        self.save_graphs_button.clicked.connect(self._save_graphs)
+        controls.addWidget(self.save_graphs_button)
+        self.graphs_status = QLabel("Графики появятся после подключения")
+        self.graphs_status.setWordWrap(True)
+        self.graphs_status.setStyleSheet("color: #aaa;")
+        controls.addWidget(self.graphs_status)
+
         self.cb_autoscale = QCheckBox("Автомасштаб Y")
         self.cb_autoscale.setChecked(True)
         self.cb_autoscale.setStyleSheet("QCheckBox { color: #5bc0be; font-weight: bold; margin-bottom: 10px; }")
@@ -367,6 +376,8 @@ class SignalViewerWindow(QMainWindow):
             self._stop_recording("Запись завершена при смене потока")
         self._connected = True
         self.record_button.setEnabled(True)
+        self.save_graphs_button.setEnabled(True)
+        self.graphs_status.setText("Будут сохранены графики всех каналов")
         if self.recording.path is None:
             self.record_status.setText("Запись не начата")
         name = info.name() or "EEG"
@@ -386,11 +397,11 @@ class SignalViewerWindow(QMainWindow):
             self._clear_channels()
         else:
             self.placeholder.setParent(None)
-            grid_widget = QWidget()
-            self.grid_layout = QGridLayout(grid_widget)
+            self.graph_grid_widget = QWidget()
+            self.grid_layout = QGridLayout(self.graph_grid_widget)
             self.grid_layout.setSpacing(4)
             self.grid_layout.setContentsMargins(0, 0, 0, 0)
-            self.right_layout.insertWidget(0, grid_widget, stretch=1)
+            self.right_layout.insertWidget(0, self.graph_grid_widget, stretch=1)
         for index, channel_name in enumerate(get_channel_names(info, count)):
             widget = ChannelWidget(index, channel_name, rate)
             widget.set_time_window(self.spin_x_window.value())
@@ -404,6 +415,27 @@ class SignalViewerWindow(QMainWindow):
             self._stop_recording("Поток отключён. Запись завершена")
         self.record_button.setEnabled(False)
         self.status_label.setText("Связь потеряна. Поиск LSL потока...")
+
+    def _save_graphs(self):
+        if not self.channel_widgets or not hasattr(self, "graph_grid_widget"):
+            return
+        default_name = datetime.now().strftime("lsl_graphs_%Y-%m-%d_%H-%M-%S.png")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить графики", default_name, "Изображение PNG (*.png)"
+        )
+        if not path:
+            return
+        try:
+            self._update_plots()
+            self.grid_layout.activate()
+            image = self.graph_grid_widget.grab()
+            if image.isNull() or not image.save(path, "PNG"):
+                raise OSError("Не удалось создать изображение PNG")
+        except OSError as exc:
+            QMessageBox.critical(self, "Ошибка сохранения", f"Не удалось сохранить графики:\n{exc}")
+            return
+        self.graphs_status.setText(f"Сохранены графики {len(self.channel_widgets)} каналов")
+        self.graphs_status.setToolTip(path)
 
     def _on_chunk(self, array: np.ndarray, timestamps: np.ndarray):
         if not self.channel_widgets or array.shape[1] != len(self.channel_widgets):
