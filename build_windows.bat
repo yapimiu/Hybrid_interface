@@ -6,6 +6,8 @@ if errorlevel 1 goto failed
 call .venv-windows\Scripts\activate.bat
 python -m pip install -r requirements.txt -r requirements-dev.txt
 if errorlevel 1 goto failed
+python scripts\install_lsl.py
+if errorlevel 1 goto failed
 python scripts\build_app.py
 if errorlevel 1 goto failed
 echo.

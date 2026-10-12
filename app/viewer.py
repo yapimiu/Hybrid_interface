@@ -7,10 +7,13 @@ numpy.ndarray формы (число отсчётов, число каналов
 
 import sys
 import time
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import PyQt5
 from PyQt5.QtCore import QEvent, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
@@ -22,6 +25,14 @@ import pyqtgraph as pg
 from pylsl import StreamInlet, resolve_byprop
 
 from app.recording import CsvRecording
+from app.p300.panel import P300Panel
+
+
+# Qt5 can derive a broken plugin prefix when the venv path contains Cyrillic.
+# Use the real package path; respect explicit deployment overrides.
+_qt_plugins = Path(PyQt5.__file__).parent / "Qt5" / "plugins" / "platforms"
+if _qt_plugins.is_dir():
+    os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", str(_qt_plugins))
 
 
 WINDOW_SEC = 0.2
@@ -53,6 +64,9 @@ class LSLReceiver(QThread):
     connected = pyqtSignal(object)
     disconnected = pyqtSignal()
     chunk_received = pyqtSignal(object, object)
+    # Separate contract: original samples/timestamps plus the measured clock offset.
+    p300_chunk_received = pyqtSignal(object, object, float)
+    synchronization_error = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -80,15 +94,31 @@ class LSLReceiver(QThread):
                 continue
 
             try:
-                self._inlet = StreamInlet(info, max_buflen=10)
+                self._inlet = StreamInlet(info, max_buflen=10, recover=False)
                 self._inlet.open_stream(timeout=1.0)
+                info = self._inlet.info(timeout=1.0)
                 self.connected.emit(info)
+                last_data = time.monotonic()
+                sync_error_reported = False
                 while self._running:
                     chunk, timestamps = self._inlet.pull_chunk(timeout=0.2, max_samples=4096)
                     if chunk:
+                        last_data = time.monotonic()
                         array = np.asarray(chunk, dtype=np.float64)
                         if array.ndim == 2 and array.shape[1] == info.channel_count():
-                            self.chunk_received.emit(array, np.asarray(timestamps, dtype=np.float64))
+                            raw_times = np.asarray(timestamps, dtype=np.float64)
+                            self.chunk_received.emit(array, raw_times)
+                            try:
+                                offset = self._inlet.time_correction(timeout=0.1)
+                            except Exception as exc:
+                                if not sync_error_reported:
+                                    self.synchronization_error.emit(f"Нет коррекции часов EEG: {exc}")
+                                    sync_error_reported = True
+                            else:
+                                self.p300_chunk_received.emit(array, raw_times, float(offset))
+                                sync_error_reported = False
+                    elif time.monotonic() - last_data > 5.0:
+                        raise TimeoutError("Поток EEG не передаёт отсчёты более 5 секунд")
             except Exception as exc:
                 if self._running:
                     print(f"LSL: соединение прервано: {exc}", file=sys.stderr)
@@ -236,12 +266,23 @@ class SignalViewerWindow(QMainWindow):
         self.sample_count = 0
         self.stream_name = ""
         self.sampling_rate = 0.0
+        self._closing = False
         self._setup_ui()
 
         self.receiver = LSLReceiver(self)
         self.receiver.connected.connect(self._on_connected)
         self.receiver.disconnected.connect(self._on_disconnected)
         self.receiver.chunk_received.connect(self._on_chunk)
+        self.receiver.p300_chunk_received.connect(self.p300_panel.worker.submit_eeg, Qt.DirectConnection)
+        self.receiver.synchronization_error.connect(
+            lambda message: self.p300_panel.worker.submit("sync_error", message), Qt.DirectConnection)
+        self.receiver.disconnected.connect(
+            lambda: self.p300_panel.worker.submit("disconnect"), Qt.DirectConnection)
+        self.receiver.connected.connect(
+            lambda info: self.p300_panel.worker.submit("disconnect"), Qt.DirectConnection)
+        self.p300_panel.worker.finished.connect(self._close_when_stopped)
+        self.p300_panel.marker_receiver.finished.connect(self._close_when_stopped)
+        self.receiver.finished.connect(self._close_when_stopped)
         self.receiver.start()
 
         self.plot_timer = QTimer(self)
@@ -361,6 +402,8 @@ class SignalViewerWindow(QMainWindow):
         self.array_view.setMaximumHeight(240)
         array_layout.addWidget(self.array_view)
         self.right_layout.addWidget(array_group)
+        self.p300_panel = P300Panel(self)
+        self.right_layout.addWidget(self.p300_panel)
         main.addWidget(sidebar, alignment=Qt.AlignTop)
         main.addWidget(right, stretch=1)
         self.resize(1600, 1000)
@@ -402,12 +445,14 @@ class SignalViewerWindow(QMainWindow):
             self.grid_layout.setSpacing(4)
             self.grid_layout.setContentsMargins(0, 0, 0, 0)
             self.right_layout.insertWidget(0, self.graph_grid_widget, stretch=1)
-        for index, channel_name in enumerate(get_channel_names(info, count)):
+        channel_names = get_channel_names(info, count)
+        for index, channel_name in enumerate(channel_names):
             widget = ChannelWidget(index, channel_name, rate)
             widget.set_time_window(self.spin_x_window.value())
             widget.plot_widget.viewport().installEventFilter(self.content_scroll)
             self.channel_widgets.append(widget)
         self._rebuild_grid()
+        self.p300_panel.set_stream(info, channel_names)
 
     def _on_disconnected(self):
         self._connected = False
@@ -415,6 +460,7 @@ class SignalViewerWindow(QMainWindow):
             self._stop_recording("Поток отключён. Запись завершена")
         self.record_button.setEnabled(False)
         self.status_label.setText("Связь потеряна. Поиск LSL потока...")
+        self.p300_panel.disconnected()
 
     def _save_graphs(self):
         if not self.channel_widgets or not hasattr(self, "graph_grid_widget"):
@@ -556,10 +602,19 @@ class SignalViewerWindow(QMainWindow):
             widget.show()
 
     def closeEvent(self, event):
+        self._closing = True
         if self.recording.active:
             self._stop_recording()
         self.receiver.stop()
+        self.p300_panel.begin_shutdown()
+        if self.receiver.isRunning() or not self.p300_panel.stopped():
+            event.ignore()
+            return
         super().closeEvent(event)
+
+    def _close_when_stopped(self):
+        if self._closing and not self.receiver.isRunning() and self.p300_panel.stopped():
+            self.close()
 
 
 def main():

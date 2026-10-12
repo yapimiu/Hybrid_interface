@@ -1,4 +1,7 @@
-pylsl
-numpy
-pyqtgraph
-PyQt5
+pylsl==1.17.6
+numpy==2.2.6
+pyqtgraph==0.13.7
+PyQt5==5.15.11
+scipy==1.15.3
+mne==1.11.0
+scikit-learn==1.6.1

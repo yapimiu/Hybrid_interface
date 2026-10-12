@@ -10,10 +10,27 @@ cd Hybrid_interface
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+python scripts/install_lsl.py
 python -m app.main
 ```
 
 На Windows активация окружения: `.venv\Scripts\activate`.
+
+Рекомендуется Python 3.12. На macOS/Windows скрипт install_lsl.py устанавливает
+закреплённую нативную liblsl только внутрь venv. На Linux установите liblsl
+для своей платформы отдельно.
+
+## P300
+
+В существующее окно добавлена панель индивидуальной калибровки, ERP и
+онлайн-классификации (Shrinkage LDA и xDAWN + LDA). Нужны реальный EEG-поток
+и внешний визуальный стимулятор с размеченными JSON-маркерами LSL.
+Проверьте каналы и физические единицы, затем примените параметры панели.
+Без маркеров или модели показывается диагностика.
+
+Подробный протокол, порядок калибровки, формат архива, offline-команды и
+проверки утечек: [docs/P300.md](docs/P300.md).
+Независимая научная валидация на реальных размеченных данных не проведена.
 
 ## Массив данных
 
@@ -38,6 +55,7 @@ python -m app.main
 ```bash
 pip install -r requirements-dev.txt
 python scripts/build_app.py
+python scripts/check_bundle.py
 ```
 
 На macOS результат — `dist/Hybrid Interface.app`. На Windows — `dist/HybridInterface.exe`.
@@ -50,8 +68,10 @@ GitHub Actions автоматически собирает приложения 
 
 - `app/viewer.py` — приём LSL, графики и вывод массива.
 - `app/recording.py` — запись данных в CSV.
+- `app/p300/` — независимое ядро P300 и дополнительная Qt-панель.
 - `app/main.py` — точка входа.
 - `scripts/build_app.py` — сборка приложения.
+- `scripts/install_lsl.py` — установка закреплённой нативной LSL в venv.
 - `hybrid_interface.spec` — настройки PyInstaller.
 
 Лицензия MIT; обязательное уведомление об авторстве сохранено в `LICENSE`.
