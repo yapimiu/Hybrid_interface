@@ -161,7 +161,8 @@ def test_dropout_stops_stimulus_and_marks_protocol_incomplete(app, tmp_path):
         assert components.stops == 1
         assert not json.loads((controller.directory / 'session.json').read_text())['protocol_complete']
         assert json.loads((controller.directory / 'stim_control.json').read_text())['state'] == 'done'
-        assert panel.spin_x.isEnabled()
+        # Settings unlock in the writer's queued finished() slot, after stopped() is already true.
+        wait(app, panel.spin_x.isEnabled)
     finally:
         cleanup(app, panel, controller)
 
