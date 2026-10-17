@@ -30,3 +30,6 @@ data/
 saved_data/
 .python-pronin/
 .uv-cache/
+
+# Local verification output: reports, recordings, session archives
+lsl_verification/
