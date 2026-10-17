@@ -10,6 +10,7 @@ from pylsl import local_clock
 from .session import SessionWriter
 from .controls import UPSTREAM_COMMIT
 from .upstream import protocol_helper
+from .erp_sums import decision_window, empty_sums, live_sums, object_numbers
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ class ExperimentController(QObject):
         self.targets = []
         self.index = 0
         self.results = []
+        self.last_sums = empty_sums()
         self.deadline = 0
         self.last_eeg_at = None
         self.trial_started_at = None
@@ -239,7 +241,15 @@ class ExperimentController(QObject):
                   'clean_counts': counts, 'mode': decision.get('mode'),
                   'scores': values, 'margin': decision.get('winner_debug', {}).get('margin'),
                   'note': 'Upstream ERP metric, not a calibrated probability or proof of P300 presence.'}
-        self.writer.submit('trial', (self.index + 1, self.panel._last_run_export_data or {}, result))
+        sums = self._trial_sums()
+        window = decision_window(self.panel)
+        numbers, number_max = object_numbers(sums, window)
+        result['flashes_per_object'] = {str(o): int(c) for o, c in zip(sums.objects, sums.counts)}
+        result['sum_numbers'] = {'window_ms': list(window), 'max_object': number_max,
+                                 'values_uv': {str(o): float(v) for o, v in zip(sums.objects, numbers)},
+                                 'note': 'Mean baseline-corrected amplitude of the summed ERP; descriptive, not calibrated.'}
+        self.writer.submit('trial', (self.index + 1, self.panel._last_run_export_data or {}, result, (sums, window)))
+        self.last_sums = sums
         self.results.append(result)
         self.trial_finished.emit(result)
         self.index += 1
@@ -247,6 +257,12 @@ class ExperimentController(QObject):
         self.deadline = time.monotonic() + self.plan.pause_s
         self._state('pause', f'Проба сохранена. Выполнено {self.index}/{len(self.targets)}')
         self.panel.set_experiment_owned(True)
+
+    def _trial_sums(self):
+        try:
+            return live_sums(self.panel)
+        except ValueError:
+            return empty_sums()
 
     def _component_finished(self, kind, code):
         if kind == 'stimulus' and self.active and self.stimulus_launched:
@@ -277,7 +293,8 @@ class ExperimentController(QObject):
                     partial = {'trial': self.index + 1, 'target': self.targets[self.index],
                                'winner': None, 'status': 'interrupted', 'reason': reason}
                     if self.writer and not self.writer.closing.is_set():
-                        self.writer.submit('trial', (self.index + 1, run, partial))
+                        self.writer.submit('trial', (self.index + 1, run, partial,
+                                                     (self._trial_sums(), decision_window(self.panel))))
                 except Exception as exc:
                     errors.append(str(exc))
             try:

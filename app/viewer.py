@@ -28,6 +28,7 @@ from app.recording import CsvRecording
 from app.bci.panel import P300Panel
 from app.bci.controls import ProcessControls
 from app.bci.experiment_panel import ExperimentPanel
+from app.bci.erp_sums import unified_array
 
 
 # Qt5 can derive a broken plugin prefix when the venv path contains Cyrillic.
@@ -399,6 +400,21 @@ class SignalViewerWindow(QMainWindow):
         self.tabs.insertTab(0, self.experiment_panel, "Единый эксперимент")
         self.setCentralWidget(self.tabs)
         self.resize(1600, 1000)
+
+    @property
+    def p300_sum_array(self) -> np.ndarray:
+        """Сумма эпох по объектам: (объекты, отсчёты от вспышки, каналы ROI)."""
+        return self.p300_panel.sums_view.result.sums
+
+    @property
+    def p300_unified_array(self) -> np.ndarray:
+        """Вариант 1: единый массив сумм (отсчёты, объекты·каналы)."""
+        return unified_array(self.p300_panel.sums_view.result)[0]
+
+    @property
+    def p300_object_numbers(self) -> np.ndarray:
+        """Вариант 2: одно число на объект (порядок — p300_panel.sums_view.result.objects)."""
+        return self.p300_panel.sums_view.numbers()[0]
 
     def _clear_channels(self):
         for widget in self.channel_widgets:

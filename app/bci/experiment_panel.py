@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGr
 
 from .experiment import ExperimentController, ExperimentPlan
 from .panel import output_root
+from .erp_sums import ObjectSumsView
 
 
 class ExperimentPanel(QWidget):
@@ -97,6 +98,8 @@ class ExperimentPanel(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.table, stretch=1)
+        self.sums_view = ObjectSumsView(viewer.p300_panel, 'Сумма эпох по объектам: текущая / последняя проба')
+        layout.addWidget(self.sums_view)
         self.controller.state_changed.connect(self.show_state)
         self.controller.trial_finished.connect(self.show_result)
         self.timer = QTimer(self)
@@ -150,6 +153,10 @@ class ExperimentPanel(QWidget):
         values = snap['decision'].get('winner_debug', {}).get('final_metric_values', [])
         distinguishable = len(values) == 9 and np.isfinite(values).all() and np.ptp(values) > 1e-9
         winner = snap['winner'] if self.controller.active and minimum >= 5 and distinguishable else None
+        if self.controller.state == 'trial' or self.controller.state == 'draining':
+            self.sums_view.refresh()
+        elif self.controller.results and self.sums_view.result is not self.controller.last_sums:
+            self.sums_view.display(self.controller.last_sums, f'Проба {self.controller.results[-1]["trial"]}')
         if not self.controller.active and self.controller.results:
             last = self.controller.results[-1]
             winner = last['winner']

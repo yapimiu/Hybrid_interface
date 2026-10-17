@@ -8,6 +8,7 @@ import threading
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 from app.recording import CsvRecording
+from .erp_sums import save_sums
 
 
 def json_value(value):
@@ -79,7 +80,7 @@ class SessionWriter(QThread):
                 if kind == 'eeg':
                     recorder.append(*payload)
                 elif kind == 'trial':
-                    number, run, result = payload
+                    number, run, result, (sums, window) = payload
                     folder = self.directory / f'trial_{number:03d}'
                     folder.mkdir(exist_ok=False)
                     (folder / 'upstream_run.json').write_text(json.dumps(run, ensure_ascii=False, default=json_value), encoding='utf-8')
@@ -93,6 +94,8 @@ class SessionWriter(QThread):
                     if arrays:
                         np.savez_compressed(folder / 'epochs.npz', epochs=np.stack(arrays),
                                             objects=np.array(objects), time_ms=np.asarray(run.get('epoch_time_ms', [])))
+                    if len(sums.objects):
+                        save_sums(sums, folder, window)
                 else:
                     events.write(json.dumps({'kind': kind, 'payload': payload}, ensure_ascii=False, default=json_value) + '\n')
                     events.flush()

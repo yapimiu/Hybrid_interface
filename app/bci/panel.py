@@ -14,6 +14,7 @@ from p300_analysis.exam_session_detail_logger import ExamSessionDetailLogger
 from p300_analysis.session_recorder import SessionRecorder
 from p300_analysis.run_export import export_run_continuous_csv, export_run_data, export_run_data_all_stims
 from .bridge import ConnectMarkers, SharedEEGInlet, ObservedMarkerInlet
+from .erp_sums import ObjectSumsView
 
 
 class ObservedSessionRecorder(SessionRecorder):
@@ -89,7 +90,9 @@ class P300Panel(upstream.P300AnalyzerWindow):
         self.summary_status.setWordWrap(True)
         outer.addWidget(self.workflow_status)
         outer.addWidget(self.summary_status)
-        outer.addWidget(original_page)
+        outer.addWidget(original_page, stretch=1)
+        self.sums_view = ObjectSumsView(self)
+        outer.addWidget(self.sums_view)
         self.setCentralWidget(wrapper)
         self.btn_refresh_streams.setToolTip('Показать поток EEG, подключённый в Hybrid Interface')
         self._set_status('EEG берётся из вкладки «EEG». Запустите внешний стимулятор, затем подключите P300.')
@@ -200,6 +203,7 @@ class P300Panel(upstream.P300AnalyzerWindow):
     def _update_loop(self):
         try:
             super()._update_loop()
+            self.sums_view.refresh()
             snap = self.analysis_snapshot()
             count = sum(snap['counts'].values())
             winner = snap['winner']
@@ -209,6 +213,10 @@ class P300Panel(upstream.P300AnalyzerWindow):
         except Exception as exc:
             self._on_disconnect_clicked()
             self._set_status('P300 остановлен: ' + str(exc))
+
+    def _on_stop_analysis_clicked(self):
+        super()._on_stop_analysis_clicked()
+        self.sums_view.refresh()  # эпохи, добранные при остановке
 
     def _on_disconnect_clicked(self):
         self.connection_revision += 1
