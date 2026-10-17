@@ -42,6 +42,7 @@ WINDOW_SEC = 0.2
 UPDATE_INTERVAL_MS = 50
 STATS_INTERVAL_MS = 500
 LSL_STREAM_TYPES = ("EEG", "Signal")
+LSL_RESOLVE_ALL = 1000
 
 pg.setConfigOptions(useOpenGL=False, antialias=False, useCupy=False)
 
@@ -72,9 +73,20 @@ class LSLReceiver(QThread):
         super().__init__(parent)
         self._running = True
         self._inlet: Optional[StreamInlet] = None
+        # Потоки, которые после подключения не передали отсчётов. НейроСпектр
+        # оставляет в сети поток каждой остановленной записи.
+        self._silent_uids: set[str] = set()
 
     def stop(self):
         self._running = False
+
+    def _choose_stream(self, streams):
+        """Самый новый поток, кроме молчавших; если молчали все — повторить их."""
+        candidates = [s for s in streams if s.uid() not in self._silent_uids]
+        if not candidates:
+            self._silent_uids.clear()
+            candidates = list(streams)
+        return max(candidates, key=lambda s: s.created_at())
 
     def run(self):
         while self._running:
@@ -83,15 +95,18 @@ class LSLReceiver(QThread):
                 if not self._running:
                     return
                 try:
-                    streams = resolve_byprop("type", stream_type, timeout=0.5)
+                    # Без большого minimum поиск завершается на первом ответившем
+                    # потоке и выбирать было бы не из чего.
+                    streams = resolve_byprop("type", stream_type, minimum=LSL_RESOLVE_ALL, timeout=0.5)
                     if streams:
-                        info = streams[0]
+                        info = self._choose_stream(streams)
                         break
                 except Exception:
                     pass
             if info is None:
                 continue
 
+            uid = info.uid()
             try:
                 self._inlet = StreamInlet(info, max_buflen=10, recover=False)
                 self._inlet.open_stream(timeout=1.0)
@@ -109,6 +124,8 @@ class LSLReceiver(QThread):
                     elif time.monotonic() - last_data > 5.0:
                         raise TimeoutError("Поток EEG не передаёт отсчёты более 5 секунд")
             except Exception as exc:
+                if isinstance(exc, TimeoutError):
+                    self._silent_uids.add(uid)
                 if self._running:
                     print(f"LSL: соединение прервано: {exc}", file=sys.stderr)
                     time.sleep(0.2)
