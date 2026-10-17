@@ -7,6 +7,7 @@ import uuid
 
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 from pylsl import local_clock
+from pylsl.lib import lib as liblsl
 from .session import SessionWriter
 from .controls import UPSTREAM_COMMIT
 from .upstream import protocol_helper
@@ -34,6 +35,14 @@ class ExperimentPlan:
             p300_calib_trials=0, calib_target_tile_id=4,
             p300_main_trials=self.trials, shuffle_seed=self.seed)
         return [item.target_tile_id for item in queue]
+
+
+def stream_xml(info):
+    """Full LSL stream description; NeuroSpectr writes its ECG label in cp1251, not UTF-8."""
+    try:
+        return info.as_xml()
+    except UnicodeDecodeError:
+        return liblsl.lsl_get_xml(info.obj).decode('utf-8', errors='replace')
 
 
 def write_stim_control(directory, payload):
@@ -107,7 +116,7 @@ class ExperimentController(QObject):
                     'started_utc': datetime.now(timezone.utc).isoformat(),
                     'upstream_commit': UPSTREAM_COMMIT, 'plan': plan.__dict__, 'targets': self.targets,
                     'channels': self.panel.stream_names, 'eeg': {'name': info.name(), 'source_id': info.source_id(),
-                    'nominal_srate': info.nominal_srate(), 'xml': info.as_xml()},
+                    'nominal_srate': info.nominal_srate(), 'xml': stream_xml(info)},
                     'input_units': self.panel.input_unit.currentText(),
                     'roi_0idx': [i for i, cb in enumerate(self.panel.channel_checkboxes) if cb.isChecked()],
                     'analysis': {'mode': 'auc', 'baseline_ms': self.panel.spin_baseline.value(),

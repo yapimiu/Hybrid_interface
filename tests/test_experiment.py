@@ -10,7 +10,7 @@ from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QLabel
 from pylsl import StreamInfo
 
-from app.bci.experiment import ExperimentController, ExperimentPlan
+from app.bci.experiment import ExperimentController, ExperimentPlan, stream_xml
 from app.bci.panel import P300Panel
 from app.bci.session import SessionWriter
 from app.bci.upstream import protocol_helper
@@ -58,9 +58,15 @@ class Markers(SyntheticMarkerInlet):
         return StreamInfo('BCI_StimMarkers', 'Markers', 1, 0, 'string', 'session-test')
 
 
-def setup(app, tmp_path, trials=1):
+class Cp1251StreamInfo(StreamInfo):
+    """NeuroSpectr labels its ECG channel in cp1251, so pylsl's as_xml() cannot decode it."""
+    def as_xml(self):
+        raise UnicodeDecodeError('utf-8', b'\xdd\xca\xc3', 0, 1, 'invalid continuation byte')
+
+
+def setup(app, tmp_path, trials=1, info=None):
     panel = P300Panel()
-    panel.set_stream(StreamInfo('test', 'EEG', 21, 250, 'double64', 'test-only'), [f'Ch{i}' for i in range(21)])
+    panel.set_stream(info or StreamInfo('test', 'EEG', 21, 250, 'double64', 'test-only'), [f'Ch{i}' for i in range(21)])
     components = Components()
     controller = ExperimentController(panel, components)
     controller.last_eeg_at = time.monotonic()
@@ -254,5 +260,24 @@ def test_manual_stop_saves_interrupted_trial(app, tmp_path):
         result = json.loads((controller.directory / 'trial_001/result.json').read_text(encoding='utf-8'))
         assert result['status'] == 'interrupted'
         assert result['winner'] is None
+    finally:
+        cleanup(app, panel, controller)
+
+
+def test_stream_xml_keeps_non_utf8_metadata():
+    raw = '<info><channel><label>ЭКГ\n[E1]</label><type>ECG</type></channel></info>'.encode('cp1251')
+    with patch('app.bci.experiment.liblsl') as liblsl:
+        liblsl.lsl_get_xml.return_value = raw
+        xml = stream_xml(Cp1251StreamInfo('test', 'EEG', 1, 250))
+    assert '<type>ECG</type>' in xml and '�' in xml
+
+
+def test_session_starts_with_neurospectr_like_metadata(app, tmp_path):
+    info = Cp1251StreamInfo('NeuronSpectrum test', 'EEG', 21, 250, 'double64', 'test-only')
+    panel, components, controller = setup(app, tmp_path, info=info)
+    try:
+        assert components.launched
+        session = json.loads((controller.directory / 'session.json').read_text(encoding='utf-8'))
+        assert '<name>NeuronSpectrum test</name>' in session['eeg']['xml']
     finally:
         cleanup(app, panel, controller)
