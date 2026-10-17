@@ -16,6 +16,9 @@ jobs:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     env:
+      # Windows runners use cp1252 for piped output; scripts print Cyrillic.
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
       PYQTGRAPH_QT_LIB: PyQt5
       QT_QPA_PLATFORM: offscreen
       MPLBACKEND: Agg
