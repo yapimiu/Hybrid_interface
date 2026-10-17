@@ -109,6 +109,8 @@ python scripts/check_bundle.py
 
 Для автоматической установки зависимостей и сборки на Windows запустите `build_windows.bat`. Подробности — в `BUILD_WINDOWS.md`.
 
+Готовый `HybridInterface.exe` для Windows лежит в разделе [Releases](https://github.com/yapimiu/Hybrid_interface/releases): при отправке тега вида `v0.1.0` GitHub Actions собирает приложения, прогоняет тесты и прикладывает сборки к релизу.
+
 GitHub Actions автоматически собирает приложения для Windows и macOS после отправки изменений в `main`. Настройки находятся в `.github/workflows/build.yml`. Готовые архивы доступны в разделе Actions → Build applications → Artifacts.
 
 ## Структура
