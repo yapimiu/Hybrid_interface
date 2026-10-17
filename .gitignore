@@ -21,3 +21,12 @@ dist/
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Read-only checkout used to refresh the vendored P300 core
+.upstream-hybrid-bci/
+.pytest_cache/
+.cursor/
+data/
+saved_data/
+.python-pronin/
+.uv-cache/

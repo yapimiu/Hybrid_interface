@@ -2,7 +2,7 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_dynamic_libs, collect_data_files, collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import collect_dynamic_libs, copy_metadata
 from PyInstaller.utils.hooks.qt import pyqt5_library_info
 import PyQt5
 
@@ -22,18 +22,18 @@ a = Analysis(
     [str(project_root / "app" / "main.py")],
     pathex=[str(project_root)],
     binaries=collect_dynamic_libs("pylsl"),
-    datas=collect_data_files("mne") + [
-        item for name in ("numpy", "scipy", "mne", "scikit-learn", "pylsl")
+    datas=[(str(project_root / "p300_analysis" / "LICENSE"), "p300_analysis"),
+           (str(project_root / "p300_analysis" / "UPSTREAM.json"), "p300_analysis"),
+           (str(project_root / "vendor" / "hybrid_bci"), "vendor/hybrid_bci"),
+           (str(project_root / "app" / "bci" / "launch_upstream.py"), "app/bci")] + [
+        item for name in ("numpy", "scipy", "pylsl")
         for item in copy_metadata(name)
     ],
-    # MNE resolves public exports lazily from .pyi files; static analysis alone misses them.
-    hiddenimports=collect_submodules(
-        "mne", filter=lambda name: ".tests" not in name and ".conftest" not in name) + collect_submodules(
-        "sklearn", filter=lambda name: ".tests" not in name),
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["PyQt6", "PySide6", "PySide2"],
+    excludes=["PyQt6", "PySide6", "PySide2", "mne", "sklearn"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

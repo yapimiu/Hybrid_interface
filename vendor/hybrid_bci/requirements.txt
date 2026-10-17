@@ -1,0 +1,13 @@
+# GUI стимуляции (PsychoPy)
+psychopy==2026.1.0
+# Маркеры LSL (gui + p300_analyzer)
+pylsl
+numpy
+# Анализатор P300 (Qt + графики)
+pyqtgraph
+PyQt5
+# SSVEP MSI standalone demo (ssvep_demo/, отдельно от P300 PyQt5)
+PyQt6>=6.5.0
+openpyxl
+pythonnet
+pyserial

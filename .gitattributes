@@ -1,0 +1,5 @@
+# Preserve the exact upstream snapshots checked by UPSTREAM.json on all OSes.
+p300_analysis/** -text
+vendor/hybrid_bci/** -text
+tests/upstream/** -text
+validation/** -text

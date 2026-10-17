@@ -19,13 +19,15 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLayout, QScrollArea, QVBoxLayout, QWidget,
-    QMainWindow, QPlainTextEdit, QSizePolicy, QPushButton, QFileDialog, QMessageBox,
+    QMainWindow, QPlainTextEdit, QSizePolicy, QPushButton, QFileDialog, QMessageBox, QTabWidget,
 )
 import pyqtgraph as pg
 from pylsl import StreamInlet, resolve_byprop
 
 from app.recording import CsvRecording
-from app.p300.panel import P300Panel
+from app.bci.panel import P300Panel
+from app.bci.controls import ProcessControls
+from app.bci.experiment_panel import ExperimentPanel
 
 
 # Qt5 can derive a broken plugin prefix when the venv path contains Cyrillic.
@@ -64,9 +66,6 @@ class LSLReceiver(QThread):
     connected = pyqtSignal(object)
     disconnected = pyqtSignal()
     chunk_received = pyqtSignal(object, object)
-    # Separate contract: original samples/timestamps plus the measured clock offset.
-    p300_chunk_received = pyqtSignal(object, object, float)
-    synchronization_error = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -75,7 +74,6 @@ class LSLReceiver(QThread):
 
     def stop(self):
         self._running = False
-        self.wait(2500)
 
     def run(self):
         while self._running:
@@ -99,7 +97,6 @@ class LSLReceiver(QThread):
                 info = self._inlet.info(timeout=1.0)
                 self.connected.emit(info)
                 last_data = time.monotonic()
-                sync_error_reported = False
                 while self._running:
                     chunk, timestamps = self._inlet.pull_chunk(timeout=0.2, max_samples=4096)
                     if chunk:
@@ -108,15 +105,6 @@ class LSLReceiver(QThread):
                         if array.ndim == 2 and array.shape[1] == info.channel_count():
                             raw_times = np.asarray(timestamps, dtype=np.float64)
                             self.chunk_received.emit(array, raw_times)
-                            try:
-                                offset = self._inlet.time_correction(timeout=0.1)
-                            except Exception as exc:
-                                if not sync_error_reported:
-                                    self.synchronization_error.emit(f"Нет коррекции часов EEG: {exc}")
-                                    sync_error_reported = True
-                            else:
-                                self.p300_chunk_received.emit(array, raw_times, float(offset))
-                                sync_error_reported = False
                     elif time.monotonic() - last_data > 5.0:
                         raise TimeoutError("Поток EEG не передаёт отсчёты более 5 секунд")
             except Exception as exc:
@@ -273,15 +261,11 @@ class SignalViewerWindow(QMainWindow):
         self.receiver.connected.connect(self._on_connected)
         self.receiver.disconnected.connect(self._on_disconnected)
         self.receiver.chunk_received.connect(self._on_chunk)
-        self.receiver.p300_chunk_received.connect(self.p300_panel.worker.submit_eeg, Qt.DirectConnection)
-        self.receiver.synchronization_error.connect(
-            lambda message: self.p300_panel.worker.submit("sync_error", message), Qt.DirectConnection)
-        self.receiver.disconnected.connect(
-            lambda: self.p300_panel.worker.submit("disconnect"), Qt.DirectConnection)
-        self.receiver.connected.connect(
-            lambda info: self.p300_panel.worker.submit("disconnect"), Qt.DirectConnection)
-        self.p300_panel.worker.finished.connect(self._close_when_stopped)
-        self.p300_panel.marker_receiver.finished.connect(self._close_when_stopped)
+        self.receiver.chunk_received.connect(self.p300_panel.submit_eeg, Qt.DirectConnection)
+        self.receiver.chunk_received.connect(self.experiment_panel.controller.eeg, Qt.DirectConnection)
+        self.p300_panel.shutdown_progress.connect(self._close_when_stopped)
+        self.component_controls.shutdown_progress.connect(self._close_when_stopped)
+        self.experiment_panel.controller.shutdown_progress.connect(self._close_when_stopped)
         self.receiver.finished.connect(self._close_when_stopped)
         self.receiver.start()
 
@@ -402,10 +386,18 @@ class SignalViewerWindow(QMainWindow):
         self.array_view.setMaximumHeight(240)
         array_layout.addWidget(self.array_view)
         self.right_layout.addWidget(array_group)
-        self.p300_panel = P300Panel(self)
-        self.right_layout.addWidget(self.p300_panel)
         main.addWidget(sidebar, alignment=Qt.AlignTop)
         main.addWidget(right, stretch=1)
+        eeg_page = self.takeCentralWidget()
+        self.tabs = QTabWidget()
+        self.tabs.addTab(eeg_page, "EEG — графики и CSV")
+        self.p300_panel = P300Panel(self)
+        self.tabs.addTab(self.p300_panel, "P300 — анализатор Пронина")
+        self.component_controls = ProcessControls(self)
+        self.tabs.addTab(self.component_controls, "Запуск и проверка")
+        self.experiment_panel = ExperimentPanel(self, self)
+        self.tabs.insertTab(0, self.experiment_panel, "Единый эксперимент")
+        self.setCentralWidget(self.tabs)
         self.resize(1600, 1000)
 
     def _clear_channels(self):
@@ -606,14 +598,16 @@ class SignalViewerWindow(QMainWindow):
         if self.recording.active:
             self._stop_recording()
         self.receiver.stop()
+        self.experiment_panel.controller.begin_shutdown()
         self.p300_panel.begin_shutdown()
-        if self.receiver.isRunning() or not self.p300_panel.stopped():
+        self.component_controls.begin_shutdown()
+        if self.receiver.isRunning() or not self.p300_panel.stopped() or not self.component_controls.stopped() or not self.experiment_panel.controller.stopped():
             event.ignore()
             return
         super().closeEvent(event)
 
     def _close_when_stopped(self):
-        if self._closing and not self.receiver.isRunning() and self.p300_panel.stopped():
+        if self._closing and not self.receiver.isRunning() and self.p300_panel.stopped() and self.component_controls.stopped() and self.experiment_panel.controller.stopped():
             self.close()
 
 
