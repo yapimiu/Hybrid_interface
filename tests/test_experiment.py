@@ -42,9 +42,11 @@ class Components(QObject):
         self.launched = []
         self.managed_session = False
         self.stops = 0
+        self.validated = 0
     def any_running(self):
         return False
     def validate_python(self):
+        self.validated += 1
         return 'test-only'
     def launch(self, kind, extra_args=None):
         self.launched.append((kind, extra_args))
@@ -64,13 +66,15 @@ class Cp1251StreamInfo(StreamInfo):
         raise UnicodeDecodeError('utf-8', b'\xdd\xca\xc3', 0, 1, 'invalid continuation byte')
 
 
-def setup(app, tmp_path, trials=1, info=None):
+def setup(app, tmp_path, trials=1, info=None, external=False):
     panel = P300Panel()
     panel.set_stream(info or StreamInfo('test', 'EEG', 21, 250, 'double64', 'test-only'), [f'Ch{i}' for i in range(21)])
     components = Components()
     controller = ExperimentController(panel, components)
     controller.last_eeg_at = time.monotonic()
-    controller.start(ExperimentPlan('synthetic-software-test', trials=trials), tmp_path)
+    if external:
+        panel.marker_name.setText('ExternalMarkers')
+    controller.start(ExperimentPlan('synthetic-software-test', trials=trials, external_stimulus=external), tmp_path)
     wait(app, lambda: controller.state == 'connecting')
     controller.timer.stop()
     return panel, components, controller
@@ -147,6 +151,65 @@ def test_full_session_preserves_raw_and_cannot_guess_missing_classes(app, tmp_pa
             assert archive['epochs'].shape[1] == 226
         events = [json.loads(line) for line in (controller.directory / 'events.jsonl').read_text().splitlines()]
         assert any(event['kind'] == 'marker' for event in events)
+    finally:
+        cleanup(app, panel, controller)
+
+
+def test_external_stimulus_session_uses_reported_target(app, tmp_path):
+    panel, components, controller = setup(app, tmp_path, external=True)
+    try:
+        assert not components.launched
+        assert components.validated == 0  # чужое Python-окружение Пронина не требуется
+        assert panel.marker_name.text() == 'ExternalMarkers'  # имя потока не перезаписано
+        session = json.loads((controller.directory / 'session.json').read_text(encoding='utf-8'))
+        assert session['stimulus'] == {'mode': 'external'}
+        assert session['targets'] == []
+        target = 3
+        panel._attach_markers(Markers(p300_trial_markers(target_tile=target, t_start=.1, n_flashes=12)), panel.connection_revision)
+        panel._timer.stop()
+        assert controller.state == 'trial'
+        source = SyntheticEEGInlet(n_channels=21, fs_hz=250, seed=5)
+        for _ in range(60):
+            samples, timestamps = source.pull_chunk(max_samples=32)
+            array, times = np.array(samples), np.array(timestamps)
+            controller.eeg(array, times)
+            panel.submit_eeg(array, times)
+            with patch('p300_analysis.qt_window.lsl_local_clock', return_value=timestamps[-1]):
+                panel._update_loop()
+        assert controller.state == 'draining'
+        controller.end_received_at = time.monotonic() - 2
+        controller.last_flash_at = time.monotonic() - 2
+        controller.tick()
+        assert controller.state == 'pause'
+        assert controller.results[0]['target'] == target  # цель взята из маркера стимулятора
+        controller.deadline = 0
+        controller.tick()
+        wait(app, controller.stopped)
+        assert controller.state == 'completed'
+        assert components.stops == 0  # чужой процесс стимулятора не останавливаем
+        meta = json.loads((controller.directory / 'session.json').read_text(encoding='utf-8'))
+        assert meta['recording_complete'] and meta['protocol_complete']
+        result = json.loads((controller.directory / 'trial_001/result.json').read_text(encoding='utf-8'))
+        assert result['target'] == target and result['winner'] is None
+        control = json.loads((controller.directory / 'stim_control.json').read_text(encoding='utf-8'))
+        assert control['state'] == 'done'
+    finally:
+        cleanup(app, panel, controller)
+
+
+@pytest.mark.parametrize('marker', ['-1|trial_start', '-1|trial_start|target=12'])
+def test_external_stimulus_rejects_trial_without_valid_target(app, tmp_path, marker):
+    panel, components, controller = setup(app, tmp_path, external=True)
+    try:
+        panel._attach_markers(Markers(), panel.connection_revision)
+        panel._timer.stop()
+        assert controller.state == 'trial'
+        controller._marker(marker, .1)
+        wait(app, controller.stopped)
+        assert controller.state == 'failed'
+        assert not controller.results
+        reason = json.loads((controller.directory / 'session.json').read_text(encoding='utf-8'))['reason']
+        assert 'target=N' in reason
     finally:
         cleanup(app, panel, controller)
 

@@ -5,7 +5,7 @@ import numpy as np
 
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
-    QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QPushButton, QFileDialog,
+    QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QPushButton, QFileDialog, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView)
 
 from .experiment import ExperimentController, ExperimentPlan
@@ -32,9 +32,10 @@ class ExperimentPanel(QWidget):
         title = QLabel('Эксперимент P300')
         title.setStyleSheet('font-size: 24px; font-weight: bold; color: #5bc0be;')
         layout.addWidget(title)
-        description = QLabel('Программа запускает исходный стимулятор, подключает маркеры, регистрирует серию проб '
-            'и сохраняет результаты. В каждой пробе испытуемый смотрит на указанную целевую плитку. '
-            'Порядок вспышек и расчёт ERP/P300 выполняет исходное ПО Пронина.')
+        description = QLabel('Программа ведёт серию P300-проб: подключает маркеры, регистрирует ERP и сохраняет '
+            'результаты. В каждой пробе испытуемый смотрит на указанную целевую плитку. '
+            'Стимулятор может запускаться самой программой (исходное ПО Пронина) или работать '
+            'со сторонним стимулятором P300 со своим потоком маркеров LSL.')
         description.setWordWrap(True)
         layout.addWidget(description)
         self.readiness = QLabel()
@@ -42,6 +43,13 @@ class ExperimentPanel(QWidget):
         layout.addWidget(self.readiness)
         settings = QGroupBox('Параметры сессии')
         form = QFormLayout(settings)
+        self.stimulus_source = QComboBox()
+        self.stimulus_source.addItem('Встроенный стимулятор Пронина', False)
+        self.stimulus_source.addItem('Сторонний стимулятор P300 (маркеры по LSL)', True)
+        self.stimulus_source.setToolTip('Во втором режиме программа не запускает стимулятор: она ждёт '
+            'поток маркеров, имя которого задано на вкладке P300. Сторонний стимулятор должен '
+            'публиковать маркеры -1|trial_start|target=N, вспышки и -2|trial_end.')
+        form.addRow('Источник стимуляции:', self.stimulus_source)
         self.subject = QLineEdit()
         self.subject.setPlaceholderText('Например, S01')
         self.trials = QSpinBox()
@@ -50,6 +58,8 @@ class ExperimentPanel(QWidget):
         self.repetitions = QSpinBox()
         self.repetitions.setRange(5, 40)
         self.repetitions.setValue(12)
+        self.repetitions.setToolTip('Число вспышек каждой плитки во встроенном стимуляторе. '
+            'Со сторонним стимулятором задаёт только ориентир таймаута пробы.')
         self.seed = QSpinBox()
         self.seed.setRange(0, 2_147_483_647)
         self.seed.setValue(0)
@@ -118,7 +128,8 @@ class ExperimentPanel(QWidget):
             if not self.folder.text().strip():
                 raise ValueError('Выберите папку для эксперимента')
             plan = ExperimentPlan(self.subject.text().strip(), self.trials.value(),
-                                  self.repetitions.value(), self.seed.value(), self.pause.value())
+                                  self.repetitions.value(), self.seed.value(), self.pause.value(),
+                                  external_stimulus=self.stimulus_source.currentData())
             self.controller.start(plan, Path(self.folder.text()))
             self.table.setRowCount(0)
         except Exception as exc:
@@ -144,9 +155,14 @@ class ExperimentPanel(QWidget):
 
     def refresh(self):
         window = self.viewer
+        if self.stimulus_source.currentData():
+            stimulus_note = (f'Сторонний стимулятор: перед началом запустите его и задайте имя потока маркеров '
+                f'«{window.p300_panel.marker_name.text()}» на вкладке P300. Программа не запускает и не останавливает его процесс.')
+        else:
+            stimulus_note = 'Исходный стимулятор будет запущен автоматически при начале сессии.'
         self.readiness.setText(f'EEG: {window.stream_name or "не подключён"}; отсчётов: {window.sample_count}. '
             f'P300: {"маркеры подключены" if window.p300_panel._inlet_markers is not None else "ожидает маркеры"}. '
-            'Исходный стимулятор будет запущен автоматически при начале сессии.')
+            + stimulus_note)
         snap = window.p300_panel.analysis_snapshot()
         counts = snap['clean_counts']
         minimum = min((counts.get(f'стимул_{i}', 0) for i in range(9)), default=0)

@@ -21,6 +21,7 @@ class ExperimentPlan:
     repetitions: int = 12
     seed: int = 0
     pause_s: float = 1.0
+    external_stimulus: bool = False
 
     def __post_init__(self):
         if not self.subject.strip():
@@ -74,6 +75,7 @@ class ExperimentController(QObject):
         self.last_flash_at = None
         self.stimulus_launched = False
         self.completed = False
+        self.trial_target = None
         self.timer = QTimer(self)
         self.timer.setInterval(100)
         self.timer.timeout.connect(self.tick)
@@ -104,9 +106,11 @@ class ExperimentController(QObject):
             raise ValueError('Остановите отдельный анализ/стимулятор/протокол перед единой сессией')
         if not any(cb.isChecked() for cb in self.panel.channel_checkboxes):
             raise ValueError('Выберите EEG-каналы ROI на вкладке P300')
-        self.components.validate_python()
+        if not plan.external_stimulus:
+            self.components.validate_python()
         self.plan = plan
-        self.targets = plan.targets()
+        self.targets = [] if plan.external_stimulus else plan.targets()
+        self.trial_target = None
         self.index = 0
         self.results = []
         self.completed = False
@@ -115,6 +119,7 @@ class ExperimentController(QObject):
         metadata = {'schema': 'hybrid-bci-session/v1', 'subject': plan.subject,
                     'started_utc': datetime.now(timezone.utc).isoformat(),
                     'upstream_commit': UPSTREAM_COMMIT, 'plan': plan.__dict__, 'targets': self.targets,
+                    'stimulus': {'mode': 'external' if plan.external_stimulus else 'builtin'},
                     'channels': self.panel.stream_names, 'eeg': {'name': info.name(), 'source_id': info.source_id(),
                     'nominal_srate': info.nominal_srate(), 'xml': stream_xml(info)},
                     'input_units': self.panel.input_unit.currentText(),
@@ -127,10 +132,11 @@ class ExperimentController(QObject):
         self.writer.failed.connect(self.fail)
         self.writer.finished.connect(self._writer_finished)
         self.panel.combo_winner_mode.setCurrentIndex(self.panel.combo_winner_mode.findData('auc'))
-        self.panel.marker_name.setText('BCI_StimMarkers')
+        if not plan.external_stimulus:
+            self.panel.marker_name.setText('BCI_StimMarkers')
         self.panel.set_experiment_owned(True)
         self.components.managed_session = True
-        self._state('preparing', 'Подготовка архива и исходного стимулятора…')
+        self._state('preparing', 'Подготовка архива' + ('…' if plan.external_stimulus else ' и исходного стимулятора…'))
         self.writer.start()
         self.timer.start()
 
@@ -149,6 +155,13 @@ class ExperimentController(QObject):
             write_stim_control(self.directory, {'state': 'paused', 'message': 'Подготовка EEG и маркеров'})
             self.panel._on_disconnect_clicked()
             self.panel.set_experiment_owned(True)
+            if self.plan.external_stimulus:
+                self.stimulus_launched = False
+                self.deadline = time.monotonic() + 600
+                self._state('connecting',
+                    f'Запустите сторонний стимулятор P300. Ожидание потока маркеров '
+                    f'«{self.panel.marker_name.text()}» (маркеры -1|trial_start|target=N … -2|trial_end)…')
+                return
             extra = ['--auto-random-protocol', '--stim-control-dir', str(self.directory),
                      '--sequences', str(self.plan.repetitions)]
             if self.components.launch('stimulus', extra_args=extra) is None:
@@ -165,9 +178,12 @@ class ExperimentController(QObject):
         elif not connected and self.state in ('trial', 'draining', 'pause'):
             self.fail('Потеряно подключение P300: ' + message)
 
+    def _trial_total(self):
+        return len(self.targets) if not self.plan.external_stimulus else self.plan.trials
+
     def _next_trial(self):
         try:
-            if self.index >= len(self.targets):
+            if self.index >= self._trial_total():
                 self.stop('Все пробы завершены', protocol_complete=True)
                 return
             self.panel._on_start_analysis_clicked()
@@ -176,10 +192,17 @@ class ExperimentController(QObject):
             self.trial_started_at = None
             self.end_received_at = None
             self.last_flash_at = None
+            self.trial_target = None
             self.deadline = time.monotonic() + 45
-            self._state('trial', f'Проба {self.index + 1}/{len(self.targets)}: ожидание cue и случайных вспышек')
-            write_stim_control(self.directory, {'state': 'trial', 'target_tile_id': self.targets[self.index],
-                'experiment_index': self.index + 1, 'experiment_total': len(self.targets), 'label': 'P300'})
+            total = self._trial_total()
+            if self.plan.external_stimulus:
+                self._state('trial', f'Проба {self.index + 1}/{total}: ожидание cue и вспышек от стороннего стимулятора')
+                write_stim_control(self.directory, {'state': 'trial', 'experiment_index': self.index + 1,
+                    'experiment_total': total, 'label': 'P300'})
+            else:
+                self._state('trial', f'Проба {self.index + 1}/{total}: ожидание cue и случайных вспышек')
+                write_stim_control(self.directory, {'state': 'trial', 'target_tile_id': self.targets[self.index],
+                    'experiment_index': self.index + 1, 'experiment_total': total, 'label': 'P300'})
         except Exception as exc:
             self.fail(str(exc))
 
@@ -197,7 +220,13 @@ class ExperimentController(QObject):
                 self.fail('Вторая trial_start до завершения пробы; проверьте единственность стимулятора')
                 return
             from p300_analysis.marker_parsing import parse_trial_target_tile_id
-            if parse_trial_target_tile_id(value) != self.targets[self.index]:
+            target = parse_trial_target_tile_id(value)
+            if self.plan.external_stimulus:
+                if target is None or not 0 <= target <= 8:
+                    self.fail('Сторонний стимулятор не сообщил цель пробы: нужен маркер -1|trial_start|target=N, N = 0..8')
+                    return
+                self.trial_target = target
+            elif target != self.targets[self.index]:
                 self.fail('Метка целевого объекта не совпала с запрошенной пробой')
                 return
             self.trial_started_at = now
@@ -218,7 +247,12 @@ class ExperimentController(QObject):
                 self.fail('EEG не передаёт свежие отсчёты более 3 секунд')
             elif self.state == 'connecting':
                 if now > self.deadline:
-                    self.fail('Не удалось подключить маркеры за 35 секунд. Проверьте Python и журнал запуска')
+                    if self.plan.external_stimulus:
+                        self.fail('Не удалось подключить поток маркеров стороннего стимулятора. '
+                                  'Проверьте, что стимулятор запущен и публикует маркеры с именем '
+                                  f'«{self.panel.marker_name.text()}»')
+                    else:
+                        self.fail('Не удалось подключить маркеры за 35 секунд. Проверьте Python и журнал запуска')
                 elif self.panel._inlet_markers is not None:
                     self._next_trial()
                 elif self.panel.connector is None or not self.panel.connector.isRunning():
@@ -245,7 +279,7 @@ class ExperimentController(QObject):
         import numpy as np
         valid = (min(counts.values()) >= 5 and snap['winner'] is not None and len(values) == 9
                  and np.isfinite(values).all() and np.ptp(values) > 1e-9)
-        result = {'trial': self.index + 1, 'target': self.targets[self.index],
+        result = {'trial': self.index + 1, 'target': self.trial_target if self.plan.external_stimulus else self.targets[self.index],
                   'winner': snap['winner'] if valid else None, 'status': 'decision' if valid else 'insufficient_evidence',
                   'clean_counts': counts, 'mode': decision.get('mode'),
                   'scores': values, 'margin': decision.get('winner_debug', {}).get('margin'),
@@ -299,7 +333,8 @@ class ExperimentController(QObject):
                 try:
                     self.panel._on_stop_analysis_clicked()
                     run = self.panel._last_run_export_data or {}
-                    partial = {'trial': self.index + 1, 'target': self.targets[self.index],
+                    partial = {'trial': self.index + 1,
+                               'target': self.trial_target if self.plan.external_stimulus else self.targets[self.index],
                                'winner': None, 'status': 'interrupted', 'reason': reason}
                     if self.writer and not self.writer.closing.is_set():
                         self.writer.submit('trial', (self.index + 1, run, partial,
