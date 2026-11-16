@@ -214,6 +214,68 @@ def test_external_stimulus_rejects_trial_without_valid_target(app, tmp_path, mar
         cleanup(app, panel, controller)
 
 
+@pytest.mark.parametrize('state', ['draining', 'pause'])
+def test_external_stimulus_rejects_early_next_trial(app, tmp_path, state):
+    panel, components, controller = setup(app, tmp_path, trials=2, external=True)
+    try:
+        panel._attach_markers(Markers(), panel.connection_revision)
+        panel._timer.stop()
+        controller._marker('-1|trial_start|target=3', .1)
+        controller._marker('-2|trial_end', .2)
+        if state == 'pause':
+            controller._finish_trial()
+            assert '1/2' in controller.message
+        assert controller.state == state
+        controller._marker('-1|trial_start|target=4', .3)
+        wait(app, controller.stopped)
+        assert controller.state == 'failed'
+        meta = json.loads((controller.directory / 'session.json').read_text(encoding='utf-8'))
+        assert not meta['protocol_complete']
+        assert 'до готовности' in meta['reason']
+        assert len(controller.results) == (1 if state == 'pause' else 0)
+        assert components.stops == 0
+    finally:
+        cleanup(app, panel, controller)
+
+
+@pytest.mark.parametrize('marker', ['100|on', '0|on', '0'])
+def test_external_stimulus_rejects_flash_before_cue(app, tmp_path, marker):
+    panel, components, controller = setup(app, tmp_path, external=True)
+    try:
+        panel._attach_markers(Markers(), panel.connection_revision)
+        panel._timer.stop()
+        controller._marker(marker, .1)
+        wait(app, controller.stopped)
+        assert controller.state == 'failed'
+        meta = json.loads((controller.directory / 'session.json').read_text(encoding='utf-8'))
+        assert 'вспышку до trial_start' in meta['reason']
+        assert not meta['protocol_complete']
+    finally:
+        cleanup(app, panel, controller)
+
+
+def test_external_extra_cue_after_final_result_preserves_completion(app, tmp_path):
+    panel, components, controller = setup(app, tmp_path, external=True)
+    try:
+        panel._attach_markers(Markers(), panel.connection_revision)
+        panel._timer.stop()
+        controller._marker('-1|trial_start|target=3', .1)
+        controller._marker('-2|trial_end', .2)
+        controller._finish_trial()
+        assert controller.state == 'pause'
+        assert '1/1' in controller.message
+        controller._marker('-1|trial_start|target=4', .3)
+        wait(app, controller.stopped)
+        assert controller.state == 'completed'
+        meta = json.loads((controller.directory / 'session.json').read_text(encoding='utf-8'))
+        assert meta['recording_complete'] and meta['protocol_complete']
+        assert len(controller.results) == 1
+        assert not (controller.directory / 'trial_002').exists()
+        assert components.stops == 0
+    finally:
+        cleanup(app, panel, controller)
+
+
 def test_dropout_stops_stimulus_and_marks_protocol_incomplete(app, tmp_path):
     panel, components, controller = setup(app, tmp_path)
     try:

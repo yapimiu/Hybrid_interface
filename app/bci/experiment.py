@@ -212,6 +212,19 @@ class ExperimentController(QObject):
         self.writer.submit('marker', {'value': value, 'source_timestamp': timestamp,
                                      'received_local_timestamp': local_clock(), 'trial': self.index + 1})
         parts = value.split('|')
+        if self.plan.external_stimulus:
+            from p300_analysis.marker_parsing import marker_value_to_stim_key
+            if len(parts) >= 2 and parts[1] == 'trial_start' and self.state in ('draining', 'pause'):
+                if self.state == 'pause' and self.index >= self._trial_total():
+                    self.stop('Все пробы завершены', protocol_complete=True)
+                    return
+                self.fail('Сторонний стимулятор начал следующую пробу до готовности анализатора. '
+                          'Дождитесь состояния «ожидание cue и вспышек» после обработки ответа и паузы')
+                return
+            if self.state == 'trial' and self.trial_started_at is None and marker_value_to_stim_key(value) is not None:
+                self.fail('Сторонний стимулятор передал вспышку до trial_start с целью; '
+                          'дождитесь готовности анализатора и сначала передайте cue target=N')
+                return
         if len(parts) < 2 or self.state not in ('trial', 'draining'):
             return
         now = time.monotonic()
@@ -298,7 +311,7 @@ class ExperimentController(QObject):
         self.index += 1
         write_stim_control(self.directory, {'state': 'paused', 'message': 'Между пробами'})
         self.deadline = time.monotonic() + self.plan.pause_s
-        self._state('pause', f'Проба сохранена. Выполнено {self.index}/{len(self.targets)}')
+        self._state('pause', f'Проба сохранена. Выполнено {self.index}/{self._trial_total()}')
         self.panel.set_experiment_owned(True)
 
     def _trial_sums(self):
