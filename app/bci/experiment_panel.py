@@ -47,7 +47,8 @@ class ExperimentPanel(QWidget):
         self.stimulus_source.addItem('Встроенный стимулятор Пронина', False)
         self.stimulus_source.addItem('Сторонний стимулятор P300 (маркеры по LSL)', True)
         self.stimulus_source.setToolTip('Во втором режиме программа не запускает стимулятор: она ждёт '
-            'поток маркеров, имя которого задано на вкладке P300. Сторонний стимулятор должен '
+            'поток маркеров, выбранный на вкладке P300 (пустое имя — автоматический поиск). '
+            'Сторонний стимулятор должен '
             'публиковать маркеры -1|trial_start|target=N, вспышки и -2|trial_end.')
         form.addRow('Источник стимуляции:', self.stimulus_source)
         self.subject = QLineEdit()
@@ -156,8 +157,10 @@ class ExperimentPanel(QWidget):
     def refresh(self):
         window = self.viewer
         if self.stimulus_source.currentData():
-            stimulus_note = (f'Сторонний стимулятор: перед началом запустите его и задайте имя потока маркеров '
-                f'«{window.p300_panel.marker_name.text()}» на вкладке P300. Программа не запускает и не останавливает его процесс.')
+            stimulus_note = (f'Сторонний стимулятор: перед началом запустите его. Поток маркеров: '
+                f'«{window.p300_panel.marker_name.text() or "автоматический поиск"}». '
+                'Если потоков несколько, выберите нужный на вкладке P300 до начала сессии. '
+                'Программа не запускает и не останавливает его процесс.')
         else:
             stimulus_note = 'Исходный стимулятор будет запущен автоматически при начале сессии.'
         self.readiness.setText(f'EEG: {window.stream_name or "не подключён"}; отсчётов: {window.sample_count}. '

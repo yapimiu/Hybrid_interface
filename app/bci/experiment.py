@@ -81,6 +81,7 @@ class ExperimentController(QObject):
         self.timer.timeout.connect(self.tick)
         self.panel.connection_changed.connect(self._connection_changed)
         self.panel.marker_observed.connect(self._marker)
+        self.panel.marker_selection_required.connect(self._marker_selection_required)
         self.components.component_finished.connect(self._component_finished)
 
     @property
@@ -133,6 +134,7 @@ class ExperimentController(QObject):
         self.writer.finished.connect(self._writer_finished)
         self.panel.combo_winner_mode.setCurrentIndex(self.panel.combo_winner_mode.findData('auc'))
         if not plan.external_stimulus:
+            self.panel._clear_marker_selection()
             self.panel.marker_name.setText('BCI_StimMarkers')
         self.panel.set_experiment_owned(True)
         self.components.managed_session = True
@@ -160,7 +162,8 @@ class ExperimentController(QObject):
                 self.deadline = time.monotonic() + 600
                 self._state('connecting',
                     f'Запустите сторонний стимулятор P300. Ожидание потока маркеров '
-                    f'«{self.panel.marker_name.text()}» (маркеры -1|trial_start|target=N … -2|trial_end)…')
+                    f'«{self.panel.marker_name.text() or "автоматический поиск"}» '
+                    '(маркеры -1|trial_start|target=N … -2|trial_end)…')
                 return
             extra = ['--auto-random-protocol', '--stim-control-dir', str(self.directory),
                      '--sequences', str(self.plan.repetitions)]
@@ -171,6 +174,10 @@ class ExperimentController(QObject):
             self._state('connecting', 'Ожидание исходного стимулятора и потока маркеров P300…')
         except Exception as exc:
             self.fail(str(exc))
+
+    def _marker_selection_required(self, message):
+        if self.active and self.state == 'connecting':
+            self.fail(message)
 
     def _connection_changed(self, connected, message):
         if connected and self.state == 'connecting':
@@ -263,7 +270,7 @@ class ExperimentController(QObject):
                     if self.plan.external_stimulus:
                         self.fail('Не удалось подключить поток маркеров стороннего стимулятора. '
                                   'Проверьте, что стимулятор запущен и публикует маркеры с именем '
-                                  f'«{self.panel.marker_name.text()}»')
+                                  f'«{self.panel.marker_name.text() or "автоматический поиск"}»')
                     else:
                         self.fail('Не удалось подключить маркеры за 35 секунд. Проверьте Python и журнал запуска')
                 elif self.panel._inlet_markers is not None:

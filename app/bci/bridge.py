@@ -5,7 +5,7 @@ import threading
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 from pylsl import StreamInlet, resolve_byprop
-from p300_analysis.lsl_streams import probe_stimulus_marker_stream
+from .marker_streams import discover_marker_streams, marker_stream_label
 
 
 class ObservedMarkerInlet:
@@ -76,27 +76,54 @@ class SharedEEGInlet:
             self._count = 0
 
 
-class ConnectMarkers(QThread):
-    connected = pyqtSignal(object)
+class DiscoverMarkers(QThread):
+    found = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, name, parent=None):
+    def run(self):
+        try:
+            streams = discover_marker_streams()
+            if not self.isInterruptionRequested():
+                self.found.emit(streams)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ConnectMarkers(QThread):
+    connected = pyqtSignal(object)
+    found = pyqtSignal(object)
+    selection_required = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, name, parent=None, stream_info=None):
         super().__init__(parent)
         self.name = name.strip()
+        self.stream_info = stream_info
 
     def run(self):
         inlet = None
         try:
-            if self.name:
-                matches = resolve_byprop('name', self.name, timeout=1)
+            if self.stream_info is not None:
+                info = self.stream_info
+            elif self.name:
+                matches = resolve_byprop('name', self.name, minimum=1000, timeout=1)
                 matches = [s for s in matches if s.channel_count() == 1]
                 if len(matches) != 1:
                     raise ValueError('Нужен один поток маркеров с именем ' + self.name)
                 info = matches[0]
             else:
-                info, _ = probe_stimulus_marker_stream(timeout=.7)
-                if info is None:
-                    raise ValueError('Не найден поток плиток BCI_StimMarkers')
+                matches = discover_marker_streams()
+                self.found.emit(matches)
+                if not matches:
+                    raise ValueError('Потоки событий не найдены. Включите передачу маркеров по LSL '
+                                     'и нажмите «Найти потоки событий».')
+                if len(matches) != 1:
+                    message = ('Найдено несколько потоков событий. Выберите нужный в списке '
+                               'на вкладке P300 и повторите запуск: '
+                               + '; '.join(marker_stream_label(s) for s in matches))
+                    self.selection_required.emit(message)
+                    raise ValueError(message)
+                info = matches[0]
             if self.isInterruptionRequested():
                 return
             inlet = StreamInlet(info, max_buflen=60, recover=False)

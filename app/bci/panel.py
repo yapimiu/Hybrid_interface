@@ -7,13 +7,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from PyQt5.QtCore import QStandardPaths, Qt, pyqtSignal
-from PyQt5.QtWidgets import QFileDialog, QLabel, QLineEdit, QComboBox, QMessageBox, QWidget, QVBoxLayout
+from PyQt5.QtWidgets import QFileDialog, QLabel, QLineEdit, QComboBox, QMessageBox, QPushButton, QWidget, QVBoxLayout
 
 import p300_analysis.qt_window as upstream
 from p300_analysis.exam_session_detail_logger import ExamSessionDetailLogger
 from p300_analysis.session_recorder import SessionRecorder
 from p300_analysis.run_export import export_run_continuous_csv, export_run_data, export_run_data_all_stims
-from .bridge import ConnectMarkers, SharedEEGInlet, ObservedMarkerInlet
+from .bridge import ConnectMarkers, DiscoverMarkers, SharedEEGInlet, ObservedMarkerInlet
+from .marker_streams import marker_stream_label
 from .erp_sums import ObjectSumsView
 
 
@@ -52,6 +53,7 @@ class P300Panel(upstream.P300AnalyzerWindow):
     shutdown_progress = pyqtSignal()
     connection_changed = pyqtSignal(bool, str)
     marker_observed = pyqtSignal(str, float)
+    marker_selection_required = pyqtSignal(str)
     analysis_updated = pyqtSignal(object)
 
     def __init__(self, parent=None):
@@ -61,6 +63,8 @@ class P300Panel(upstream.P300AnalyzerWindow):
         self.stream_names = []
         self.shared_inlet = None
         self.connector = None
+        self.marker_discovery = None
+        self._selected_marker_info = None
         self.closing = False
         self.connection_revision = 0
         self.last_decision = None
@@ -72,14 +76,26 @@ class P300Panel(upstream.P300AnalyzerWindow):
         self.combo_streams.setEnabled(False)
         self.btn_connect.setEnabled(False)
         sidebar = self.btn_connect.parentWidget().layout()
-        self.marker_name = QLineEdit('BCI_StimMarkers')
+        self.marker_name = QLineEdit()
+        self.marker_name.setPlaceholderText('Автоматически / точное имя')
+        self.marker_name.setToolTip('Пустое имя: найти единственный поток событий. '
+                                    'Если потоков несколько, выберите нужный в списке.')
+        self.marker_name.textChanged.connect(self._clear_marker_selection)
+        self.marker_streams = QComboBox()
+        self.marker_streams.addItem('Автоматически', None)
+        self.marker_streams.view().setMinimumWidth(650)
+        self.marker_streams.activated.connect(self._select_marker_stream)
+        self.btn_find_markers = QPushButton('Найти потоки событий')
+        self.btn_find_markers.clicked.connect(self._find_marker_streams)
         self.input_unit = QComboBox()
         self.input_unit.addItems(['uV', 'mV', 'V'])
         self.btn_connect.setText('Подключить маркеры P300')
         sidebar.insertWidget(2, QLabel('Имя потока маркеров:'))
         sidebar.insertWidget(3, self.marker_name)
-        sidebar.insertWidget(4, QLabel('Единицы входной EEG (для P300):'))
-        sidebar.insertWidget(5, self.input_unit)
+        sidebar.insertWidget(4, self.marker_streams)
+        sidebar.insertWidget(5, self.btn_find_markers)
+        sidebar.insertWidget(6, QLabel('Единицы входной EEG (для P300):'))
+        sidebar.insertWidget(7, self.input_unit)
         original_page = self.takeCentralWidget()
         wrapper = QWidget()
         outer = QVBoxLayout(wrapper)
@@ -103,6 +119,75 @@ class P300Panel(upstream.P300AnalyzerWindow):
         self._on_refresh_streams_clicked()
         self._build_channel_checkboxes(info.channel_count(), labels=self.stream_names)
         self.btn_connect.setEnabled(True)
+
+    def _clear_marker_selection(self, *_):
+        self._selected_marker_info = None
+        self.marker_streams.setCurrentIndex(0)
+
+    def _select_marker_stream(self, index):
+        info = self.marker_streams.itemData(index)
+        self.marker_name.setText(info.name() if info is not None else '')
+        self._selected_marker_info = info
+        self.marker_streams.setCurrentIndex(index)
+
+    def _show_marker_streams(self, streams):
+        if self.closing:
+            return
+        selected = self._selected_marker_info
+        self.marker_streams.clear()
+        self.marker_streams.addItem('Автоматически', None)
+        for info in streams:
+            self.marker_streams.addItem(marker_stream_label(info), info)
+            self.marker_streams.setItemData(self.marker_streams.count() - 1,
+                                           marker_stream_label(info), Qt.ToolTipRole)
+        self._selected_marker_info = None
+        for index, info in enumerate(streams, 1):
+            if selected is not None and info.uid() == selected.uid():
+                self._select_marker_stream(index)
+                break
+        else:
+            if len(streams) == 1 and not self.marker_name.text().strip():
+                self._select_marker_stream(1)
+
+    def _find_marker_streams(self):
+        if (self.closing or self.managed_session or self._inlet_markers is not None
+                or (self.connector and self.connector.isRunning())
+                or (self.marker_discovery and self.marker_discovery.isRunning())):
+            return
+        self.btn_find_markers.setEnabled(False)
+        self._set_status('Поиск потоков событий LSL…')
+        self.marker_discovery = DiscoverMarkers(self)
+        self.marker_discovery.found.connect(self._marker_streams_found)
+        self.marker_discovery.failed.connect(self._marker_search_failed)
+        self.marker_discovery.finished.connect(self._marker_search_finished)
+        self.marker_discovery.start()
+
+    def _marker_streams_found(self, streams):
+        if self.closing or self.managed_session or self._inlet_markers is not None:
+            return
+        self._show_marker_streams(streams)
+        if not streams:
+            self._set_status('Потоки событий не найдены. Включите передачу маркеров по LSL. '
+                             'Если события находятся внутри EEG, нужен адаптер их извлечения.')
+        elif len(streams) == 1:
+            self._set_status('Найден поток событий: ' + marker_stream_label(streams[0]))
+        else:
+            self._set_status('Найдено несколько потоков событий. Выберите нужный в списке.')
+
+    def _marker_search_failed(self, message):
+        if not self.closing and not self.managed_session:
+            self._set_status('Ошибка поиска потоков событий: ' + message)
+
+    def _marker_search_finished(self):
+        self._update_marker_controls()
+        self.shutdown_progress.emit()
+
+    def _update_marker_controls(self):
+        busy = (self.closing or self.managed_session or self._inlet_markers is not None
+                or bool(self.connector and self.connector.isRunning()))
+        self.marker_streams.setEnabled(not busy)
+        self.btn_find_markers.setEnabled(not busy and not (
+            self.marker_discovery and self.marker_discovery.isRunning()))
 
     def _set_status(self, text):
         super()._set_status(text)
@@ -135,6 +220,7 @@ class P300Panel(upstream.P300AnalyzerWindow):
             self.btn_start_analysis.setEnabled(connected and not self._recording_epochs)
             self.btn_stop_analysis.setEnabled(connected and self._recording_epochs)
             self.btn_reset_analysis.setEnabled(connected)
+        self._update_marker_controls()
 
     def analysis_snapshot(self):
         decision = self.last_decision or {}
@@ -163,18 +249,27 @@ class P300Panel(upstream.P300AnalyzerWindow):
             self._set_status('Ожидание EEG/Signal в основном просмотрщике.')
 
     def _on_connect_clicked(self):
-        if self._timer.isActive() or self.stream_info is None or (self.connector and self.connector.isRunning()):
+        if (self.closing or self._timer.isActive() or self.stream_info is None
+                or (self.connector and self.connector.isRunning())
+                or (self.marker_discovery and self.marker_discovery.isRunning())):
             return
         self.connection_revision += 1
         revision = self.connection_revision
         self.btn_connect.setEnabled(False)
         self.marker_name.setEnabled(False)
         self.input_unit.setEnabled(False)
+        self.marker_streams.setEnabled(False)
+        self.btn_find_markers.setEnabled(False)
         self._set_status('Подключение к потоку маркеров…')
-        self.connector = ConnectMarkers(self.marker_name.text(), self)
+        self.connector = ConnectMarkers(self.marker_name.text(), self, stream_info=self._selected_marker_info)
+        self.connector.found.connect(lambda streams: self._show_marker_streams(streams)
+                                     if revision == self.connection_revision else None)
+        self.connector.selection_required.connect(lambda message: self.marker_selection_required.emit(message)
+                                                 if revision == self.connection_revision else None)
         self.connector.connected.connect(lambda inlet: self._attach_markers(inlet, revision))
         self.connector.failed.connect(lambda message: self._connect_failed(message, revision))
         self.connector.finished.connect(self.shutdown_progress)
+        self.connector.finished.connect(self._update_marker_controls)
         self.connector.start()
 
     def _connect_failed(self, message, revision):
@@ -185,6 +280,7 @@ class P300Panel(upstream.P300AnalyzerWindow):
             self.input_unit.setEnabled(True)
             self._markers_presence_label.setText(message)
             self.connection_changed.emit(False, message)
+            self.set_experiment_owned(self.managed_session)
 
     def _attach_markers(self, inlet, revision):
         if self.closing or self.stream_info is None or revision != self.connection_revision:
@@ -231,6 +327,7 @@ class P300Panel(upstream.P300AnalyzerWindow):
         # The upstream exporter remains available for the completed recording.
         self.btn_save_exam.setEnabled(bool(self._last_run_export_data))
         self.connection_changed.emit(False, 'P300 отключён')
+        self._update_marker_controls()
 
     def disconnected(self):
         self._on_disconnect_clicked()
@@ -271,6 +368,8 @@ class P300Panel(upstream.P300AnalyzerWindow):
         if self.closing:
             return
         self.closing = True
+        if self.marker_discovery and self.marker_discovery.isRunning():
+            self.marker_discovery.requestInterruption()
         self._on_disconnect_clicked()
         if self._exam_detail_log is not None:
             self._exam_detail_log.close()
@@ -281,4 +380,5 @@ class P300Panel(upstream.P300AnalyzerWindow):
                 widget.close()
 
     def stopped(self):
-        return not (self.connector and self.connector.isRunning())
+        return not ((self.connector and self.connector.isRunning())
+                    or (self.marker_discovery and self.marker_discovery.isRunning()))

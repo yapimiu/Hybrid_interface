@@ -13,13 +13,14 @@ from validation.synthetic_streams import SyntheticEEGInlet, p300_trial_markers
 pytestmark = pytest.mark.skipif(os.environ.get('RUN_LSL_NETWORK') != '1', reason='Set RUN_LSL_NETWORK=1 for real local LSL sockets')
 
 
-def test_original_source_over_lsl_into_both_tabs(tmp_path):
+@pytest.mark.parametrize('automatic', [False, True])
+def test_original_source_over_lsl_into_both_tabs(tmp_path, automatic):
     from app.viewer import SignalViewerWindow
     app = QApplication.instance() or QApplication([])
     token = uuid.uuid4().hex
     eeg_name, marker_name = 'EEG_TEST_' + token, 'BCI_TEST_' + token
     eeg = StreamOutlet(StreamInfo(eeg_name, 'EEG', 21, 250, 'double64', token))
-    markers = StreamOutlet(StreamInfo(marker_name, 'Markers', 1, 0, 'string', token + '_m'))
+    markers = StreamOutlet(StreamInfo(marker_name, 'Events' if automatic else 'Markers', 1, 0, 'string', token + '_m'))
     def wait(predicate, seconds=10):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
@@ -35,7 +36,8 @@ def test_original_source_over_lsl_into_both_tabs(tmp_path):
         try:
             wait(lambda: window._connected)
             panel = window.p300_panel
-            panel.marker_name.setText(marker_name)
+            if not automatic:
+                panel.marker_name.setText(marker_name)
             panel._on_connect_clicked()
             wait(lambda: panel._inlet_markers is not None)
             wait(lambda: eeg.have_consumers() and markers.have_consumers())

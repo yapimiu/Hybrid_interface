@@ -155,6 +155,20 @@ def test_full_session_preserves_raw_and_cannot_guess_missing_classes(app, tmp_pa
         cleanup(app, panel, controller)
 
 
+def test_external_ambiguous_streams_stop_session_for_selection(app, tmp_path):
+    panel, components, controller = setup(app, tmp_path, external=True)
+    try:
+        panel.marker_selection_required.emit('Найдено несколько потоков событий. Выберите нужный в списке.')
+        assert controller.state == 'failed'
+        assert not components.launched
+        wait(app, controller.stopped)
+        app.processEvents()
+        assert controller.state == 'failed'
+        assert panel.marker_streams.isEnabled()
+    finally:
+        cleanup(app, panel, controller)
+
+
 def test_external_stimulus_session_uses_reported_target(app, tmp_path):
     panel, components, controller = setup(app, tmp_path, external=True)
     try:
